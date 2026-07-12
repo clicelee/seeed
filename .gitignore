@@ -5,3 +5,6 @@ meshtastic-firmware/
 hr-quality/test_hr
 *.o
 .pio/
+
+# Private dev notes
+notes/
