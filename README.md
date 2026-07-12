@@ -38,8 +38,13 @@ No reading beats a wrong reading.
 ```bash
 git clone --depth 1 https://github.com/meshtastic/firmware meshtastic-firmware
 ./patches/apply.sh
-cd meshtastic-firmware && pio run -e seeed_xiao_nrf52840_kit_i2c
+cd meshtastic-firmware && pio run -e seeed_xiao_nrf52840_kit_i2c_health
 ```
+
+Note: health telemetry is compiled out of every stock Meshtastic build (a global
+`-DMESHTASTIC_EXCLUDE_HEALTH_TELEMETRY=1` in `platformio.ini`). Our patch adds a
+`seeed_xiao_nrf52840_kit_i2c_health` env that re-enables it for this kit —
+flash the resulting UF2 by double-tapping reset and dragging it onto the drive.
 
 Host-test the algorithm without any hardware:
 
@@ -51,7 +56,7 @@ cd hr-quality && c++ -std=c++17 -O2 test_hr_algo.cpp hr_algo.cpp -o test_hr && .
 
 - [x] Estimator designed + validated on synthetic PPG (host tests, 8/8)
 - [x] Ported into Meshtastic `MAX30102Sensor` with SQI gating (+ SpO2 validity bugfix)
-- [ ] Firmware build for `seeed_xiao_nrf52840_kit_i2c` *(in progress)*
+- [x] Firmware builds for `seeed_xiao_nrf52840_kit_i2c_health` — estimator verified present in the ELF, UF2 ready to flash
 - [ ] Hardware bring-up (parts ordered, ETA late July)
 - [ ] Real-wrist validation & threshold tuning
 - [ ] Field test: vitals over multi-hop mesh, range numbers

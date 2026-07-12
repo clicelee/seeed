@@ -169,3 +169,19 @@ index ceca4be..267e5bd 100644
      }
      return true;
  }
+diff --git a/variants/nrf52840/seeed_xiao_nrf52840_kit/platformio.ini b/variants/nrf52840/seeed_xiao_nrf52840_kit/platformio.ini
+index 7018d05..ca8d65d 100644
+--- a/variants/nrf52840/seeed_xiao_nrf52840_kit/platformio.ini
++++ b/variants/nrf52840/seeed_xiao_nrf52840_kit/platformio.ini
+@@ -33,3 +33,11 @@ build_flags = ${env:seeed_xiao_nrf52840_kit.build_flags}
+   -DSEEED_XIAO_NRF52840_KIT
+   -DSEEED_XIAO_NRF_KIT_I2C     ; Define I2C variant
+   -USEEED_XIAO_NRF_KIT_DEFAULT ; Remove default define
++
++; I2C variant with health telemetry (MAX30102 heart rate / SpO2) enabled —
++; health telemetry is disabled in the global [env] build_flags, re-enable it here
++[env:seeed_xiao_nrf52840_kit_i2c_health]
++extends = env:seeed_xiao_nrf52840_kit_i2c
++board_level = extra
++build_flags = ${env:seeed_xiao_nrf52840_kit_i2c.build_flags}
++  -UMESHTASTIC_EXCLUDE_HEALTH_TELEMETRY
