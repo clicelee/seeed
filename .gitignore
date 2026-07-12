@@ -1,0 +1,7 @@
+# Upstream clone — our changes are tracked as patches/ (see patches/apply.sh)
+meshtastic-firmware/
+
+# Host-test binaries
+hr-quality/test_hr
+*.o
+.pio/

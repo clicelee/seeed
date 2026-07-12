@@ -1,0 +1,171 @@
+diff --git a/src/modules/Telemetry/Sensor/HrSqiEstimator.h b/src/modules/Telemetry/Sensor/HrSqiEstimator.h
+new file mode 100644
+index 0000000..2bfe56b
+--- /dev/null
++++ b/src/modules/Telemetry/Sensor/HrSqiEstimator.h
+@@ -0,0 +1,121 @@
++#pragma once
++
++/*
++ * Autocorrelation-based heart-rate estimator with a signal-quality index (SQI).
++ *
++ * Motivation: the Maxim reference algorithm (spo2_algorithm.h) detects beats in
++ * the time domain and is easily fooled by baseline wander and motion artifacts,
++ * reporting confident-looking but wrong BPM values. On a mesh, a wrong vital is
++ * worse than no vital: it costs airtime and can mislead whoever is watching.
++ *
++ * Pipeline (window = MAX30102_BUFFER_LEN samples at the effective sample rate):
++ *   1. Detrend with a centered moving average (removes DC + low-freq wander)
++ *   2. Normalized autocorrelation over the physiological lag range (40-220 BPM)
++ *   3. Peak lag -> BPM, refined with parabolic interpolation
++ *   4. Peak height (0..1) is the SQI; below threshold the reading is rejected
++ *
++ * Pure, allocation-free, single-header; no dependency on Arduino or the mesh
++ * stack, so it is host-testable (see the project's synthetic-PPG test suite).
++ */
++
++#include <stddef.h>
++#include <stdint.h>
++
++namespace HrSqi
++{
++
++struct Config {
++    float fs = 25.0f;      // effective sample rate, Hz (100 Hz / sampleAverage 4)
++    float minBpm = 40.0f;  // search range
++    float maxBpm = 220.0f;
++    float sqiMin = 0.30f;  // reject readings whose SQI falls below this
++};
++
++struct Result {
++    bool valid;  // SQI >= sqiMin
++    float bpm;   // meaningless when !valid
++    float sqi;   // normalized autocorrelation peak, 0..1
++};
++
++static const size_t HR_SQI_MAX_N = 256;
++
++inline Result estimate(const uint32_t *raw, size_t n, const Config &cfg = Config())
++{
++    Result r = {false, 0.0f, 0.0f};
++    if (n < 16)
++        return r;
++    if (n > HR_SQI_MAX_N)
++        n = HR_SQI_MAX_N;
++
++    int minLag = (int)(60.0f * cfg.fs / cfg.maxBpm);
++    int maxLag = (int)(60.0f * cfg.fs / cfg.minBpm + 0.9999f);
++    if (minLag < 2)
++        minLag = 2;
++    if (maxLag > (int)n - 2)
++        maxLag = (int)n - 2;
++    if (maxLag <= minLag)
++        return r;
++
++    // Detrend: subtract a centered moving average (~0.75 s wide)
++    static float y[HR_SQI_MAX_N];
++    int w = (int)(cfg.fs * 0.75f);
++    int half = w / 2;
++    for (size_t i = 0; i < n; i++) {
++        int lo = (int)i - half;
++        if (lo < 0)
++            lo = 0;
++        int hi = (int)i + half;
++        if (hi > (int)n - 1)
++            hi = (int)n - 1;
++        float sum = 0.0f;
++        for (int j = lo; j <= hi; j++)
++            sum += (float)raw[j];
++        y[i] = (float)raw[i] - sum / (float)(hi - lo + 1);
++    }
++
++    float r0 = 0.0f;
++    for (size_t i = 0; i < n; i++)
++        r0 += y[i] * y[i];
++    if (r0 <= 1e-9f)
++        return r; // perfectly flat: nothing on the sensor
++
++    // Normalized autocorrelation, best peak in the physiological range
++    int bestLag = -1;
++    float bestVal = -1e30f;
++    for (int lag = minLag; lag <= maxLag; lag++) {
++        float acc = 0.0f;
++        for (size_t i = 0; i + lag < n; i++)
++            acc += y[i] * y[i + lag];
++        float norm = acc / r0;
++        if (norm > bestVal) {
++            bestVal = norm;
++            bestLag = lag;
++        }
++    }
++    if (bestLag < 0)
++        return r;
++
++    // Parabolic interpolation around the peak for sub-sample lag precision
++    float rPrev = 0.0f, rNext = 0.0f;
++    for (size_t i = 0; i + (bestLag - 1) < n; i++)
++        rPrev += y[i] * y[i + (bestLag - 1)];
++    for (size_t i = 0; i + (bestLag + 1) < n; i++)
++        rNext += y[i] * y[i + (bestLag + 1)];
++    rPrev /= r0;
++    rNext /= r0;
++    float denom = rPrev - 2.0f * bestVal + rNext;
++    float delta = 0.0f;
++    if (denom != 0.0f)
++        delta = 0.5f * (rPrev - rNext) / denom;
++    if (delta > 0.5f)
++        delta = 0.5f;
++    if (delta < -0.5f)
++        delta = -0.5f;
++
++    r.bpm = 60.0f * cfg.fs / ((float)bestLag + delta);
++    r.sqi = bestVal;
++    r.valid = bestVal >= cfg.sqiMin;
++    return r;
++}
++
++} // namespace HrSqi
+diff --git a/src/modules/Telemetry/Sensor/MAX30102Sensor.cpp b/src/modules/Telemetry/Sensor/MAX30102Sensor.cpp
+index ceca4be..267e5bd 100644
+--- a/src/modules/Telemetry/Sensor/MAX30102Sensor.cpp
++++ b/src/modules/Telemetry/Sensor/MAX30102Sensor.cpp
+@@ -3,6 +3,7 @@
+ #if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR && !MESHTASTIC_EXCLUDE_HEALTH_TELEMETRY && __has_include(<MAX30105.h>)
+ 
+ #include "../mesh/generated/meshtastic/telemetry.pb.h"
++#include "HrSqiEstimator.h"
+ #include "MAX30102Sensor.h"
+ #include "TelemetrySensor.h"
+ #include <spo2_algorithm.h>
+@@ -64,10 +65,19 @@ bool MAX30102Sensor::getMetrics(meshtastic_Telemetry *measurement)
+ 
+     maxim_heart_rate_and_oxygen_saturation(ir_buff, MAX30102_BUFFER_LEN, red_buff, &spo2, &spo2_valid, &heart_rate,
+                                            &heart_rate_valid);
+-    LOG_DEBUG("heart_rate=%d(%d), sp02=%d(%d)", heart_rate, heart_rate_valid, spo2, spo2_valid);
+-    if (heart_rate_valid) {
++
++    // Heart rate: autocorrelation estimator with signal-quality gating.
++    // Effective sample rate = sampleRate 100 Hz / sampleAverage 4 = 25 Hz.
++    // Readings with a low SQI (motion, poor contact, no wearer) are suppressed
++    // instead of being sent over the mesh as confident-looking wrong values.
++    HrSqi::Config cfg;
++    cfg.fs = 25.0f;
++    HrSqi::Result hr = HrSqi::estimate(ir_buff, MAX30102_BUFFER_LEN, cfg);
++    LOG_DEBUG("hr_sqi=%.1fbpm (sqi=%.2f valid=%d), maxim heart_rate=%d(%d), sp02=%d(%d)", hr.bpm, hr.sqi, hr.valid, heart_rate,
++              heart_rate_valid, spo2, spo2_valid);
++    if (hr.valid) {
+         measurement->variant.health_metrics.has_heart_bpm = true;
+-        measurement->variant.health_metrics.heart_bpm = heart_rate;
++        measurement->variant.health_metrics.heart_bpm = (uint32_t)(hr.bpm + 0.5f);
+     } else {
+         measurement->variant.health_metrics.has_heart_bpm = false;
+     }
+@@ -75,7 +85,7 @@ bool MAX30102Sensor::getMetrics(meshtastic_Telemetry *measurement)
+         measurement->variant.health_metrics.has_spO2 = true;
+         measurement->variant.health_metrics.spO2 = spo2;
+     } else {
+-        measurement->variant.health_metrics.has_spO2 = true;
++        measurement->variant.health_metrics.has_spO2 = false; // was `true`: invalid SpO2 leaked into telemetry
+     }
+     return true;
+ }
